@@ -1,0 +1,387 @@
+---
+title: "Análise dos Dados de Entregas Husky"
+author: "Gustavo Flores"
+date: "August 29, 2018"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+    toc: true
+    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+
+#### Sobre
+
+Análise dos dados de entregas da empresa [Husky - tecnologia para delivery](https://gohusky.net/), atuante no ramo de delivery em Porto Alegre. Os dados aqui publicados são de propriedade da Husky, não podendo serem distribuidos sem prévia autorização.
+
+#### Libraries
+
+```{r}
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(leaflet)
+library(rgdal)
+library(tidyr)
+library(ggplot2)
+library(plotly)
+library(RColorBrewer)
+```
+
+
+### 1. Importando os dados, limpando e formatando variáveis (Data Cleaning) 
+
+Importamos o arquivo `.csv` usando a função `data.table::fread`. Foi criado um vetor de nomes para simplificar o nome das variáveis segundo o padrão 'lowerCamel'.
+
+```{r}
+dados <- fread("rest_order.csv",encoding="UTF-8",drop = c(1,2,4,5,9,14,15),
+            na.strings = c("NULL","","0000-00-00 00:00:00"))
+names(dados) <- c("idRestaurante","endereco","latitude","longitude","bairro",
+                  "valorACobrar","valorRecolhidoCliente","taxaCartao","formaDePagamento",
+                  "entregaCriada","entregaAgendada","entregaAceita","coletaIniciada",
+                  "coletaFinalizada","chegadaNoCliente","entregaFinalizada","status",
+                  "idCourier","operador","precoEntrega")
+```
+
+
+#### Corrigindo a variável bairro
+
+Como os endereços usados pelo GoogleMaps seguem um padrão `"Rua, N - Bairro, Cidade"`, usamos a função `tidyr::separate` na variável `endereço` para corrigir diversas observações de bairro que continham valores incompletos ou inexistentes. NAs do `bairro` cairam de 287 para 21.
+
+```{r}
+nabairro <- dados %>%  
+# Selecionando as linhas com nome da cidade, estado, país e NAs. 
+    filter(bairro %in% c("Porto Alegre","Brazil","Brasil","Rio Grande do Sul")| is.na(bairro)) %>%
+  # Selecionando a coluna endereço
+  dplyr::select(endereco) %>%
+  # Separando endereco no hífen
+  separate(endereco,into=c("end1","end2"),sep=c("-")) %>% 
+  # Separando end2 (Bairro, Cidade) na vírgula
+  separate(end2,into=c("end3","end4"),sep=",") %>% 
+  data.table() %>%
+  # Anulando end1 e end4, ficando só com end3
+  set(j=c("end1","end4"),value = NULL)
+# Usando set para atribuir os novos bairros certos 
+narows <- dados[,which(bairro %in% c("Porto Alegre","Brazil","Brasil","Rio Grande do Sul")| is.na(bairro))]
+set(x = dados, i = narows, j="bairro", value = nabairro)
+
+# Se livrando da variavel "endereco", usada apenas nas linhas acima
+set(x = dados,j = "endereco",value = NULL)
+```
+
+O nome dos bairros também foi ajustado conforme a nomenclatura contida nos shapefiles publicados no [site da prefeitura de Porto Alegre](http://www2.portoalegre.rs.gov.br/spm/default.php?p_secao=310), pois usaremos esses dados para gerar um mapa com o número de entrega em cada bairro. Criamos uma lista com os nomes a serem modificados, e depois utilizamos a função `gsub` para substituir os padrões dentro de um `for`loop.
+
+```{r, error=FALSE,warning=FALSE}
+bairros <- list(
+  `Centro Histórico` = "Centro$|CENTRO$|• Centro Histórico|Centro Hist$|Centro/Azenha|
+  Cais do Porto|Avenida Borges de Medeiros|Riachuelo|Rua Demétrio Ribeiro|
+  Rua dos Andradas|Rua Duque de Caxias|Rua Siqueira Campos|Rua Voluntários da Pátria|
+  Praça Osvaldo Cruz|Praça dos Açorianos",
+  `Bom Fim` = "Bom Fim|Bonfim",
+  Farroupilha = "Farropilha",
+  Glória = "Glória|Gloria|Gl$",
+  `Cel. Aparicio Borges` = "Coronel Aparicio Borges",
+  Independência = "Independ$|Avenida Independência",
+  `Jardim Botânico` = "Jardim Botanico|Jardim Bot$|Jardom Botanico",
+  `Jardim Sabará` = "^Jardim Itu-Sabará$",
+  `Jardim Lindóia` = "^Jardim Lindoia",
+  `Santa Cecília` = "Santa Cecilia",
+  `Santo Antônio` = "Santo Antonio",
+  Partenon = "Partenon|Paternon",
+  Petrópolis = "Petropolis|Petr$",
+  `Menino Deus` = "Menino Deus|Marcilio Dias|Avenida Padre Cacique|Getúlio Vargas",
+  `Montserrat` = "^Mont'Serrat",
+  `Passo da Areia` = "Passo D' Areia",
+  `Santa Tereza` = "Santa Teresa",
+  `Praia de Belas` = "PR Belas",
+  `Teresópolis` = "Teresopolis|^Alto Teresópolis$|^Alto Teresopolis$",
+  Higienópolis = "Higien$",
+  `Mário Quintana` = "Protásio Alves|^Alto Petropolis$|^Alto Petrópolis$")
+```
+```{r, error=FALSE,warning=FALSE}
+for (i in 1:length(bairros)){
+  dados$bairro <- gsub(bairros[[i]],names(bairros)[i],dados$bairro)
+}
+
+# Limpando excesso de white space remanescentes
+dados$bairro <- trimws(dados$bairro,"both")
+
+# Forçando valores sem sentido da variavel "bairros" para NA
+dumpbairro <- which(dados$bairro %in% c("Parque Amador","Paraíso","an 20","RS",
+                                        "Acesso Oeste","201 C","2º Andar","Maringá"))
+set(x=dados,i=dumpbairro,j="bairro",value=NA)
+
+# Todas maiúsculas, igual shapefile
+dados$bairro <- toupper(dados$bairro)
+rm(i,bairros,nabairro,narows,dumpbairro); gc()
+```
+
+
+#### Transformando dados em fator, numérico e data
+
+Nossos dados foram importados alguns como caractere e outras como numérico, exigindo algumas transformações. As datas foram transformadas no padrão `POSIXct` usando o pacote `lubridate`, permitindo uma melhor manipulação destas. 
+
+```{r}
+# Fator: restId,bairro,formaPag,status,motoId,operador
+fac.nome <- c('idRestaurante','bairro','formaDePagamento','idCourier','operador')
+dados[, (fac.nome) := lapply(.SD, as.factor), .SDcols = fac.nome]
+
+# Numerico: latitude, longitude, valCobrar, valRecol, taxaCard,precoEnt
+num.nome <- c('latitude','longitude','valorACobrar','valorRecolhidoCliente',
+              'taxaCartao','precoEntrega')
+dados[, (num.nome) := lapply(.SD, as.numeric,na.rm=T), .SDcols = num.nome]
+dados[valorACobrar < 0, valorACobrar := NA]
+
+# Data: entCriada, entAgend, entAceit, colIni, colFin, chegada, entFin 
+data.nome <- c('entregaCriada','entregaAgendada','entregaAceita','coletaIniciada',
+               'coletaFinalizada','chegadaNoCliente','entregaFinalizada')
+dados[, (data.nome) := lapply(.SD, mdy_hm), .SDcols = data.nome]
+rm(fac.nome,num.nome,data.nome)
+```
+
+
+#### Separando as datas em meses, horas e dia da semana
+
+Criamos algumas variáveis de agregação de datas para auxiliar nas visualizações.
+
+```{r}
+# Variaveis das datas
+meses <- month(dados[!is.na(entregaAceita),entregaAceita], label = T)
+meses16 <- month(dados[year(entregaAceita) == 2016 & !is.na(entregaAceita),entregaAceita], label = T)
+meses17 <- month(dados[year(entregaAceita) == 2017 & !is.na(entregaAceita),entregaAceita], label = T)
+meses18 <- month(dados[year(entregaAceita) == 2018 & !is.na(entregaAceita),entregaAceita], label = T)
+semdia <- wday(dados[!is.na(entregaAceita),entregaAceita], label = T)
+hora <- hour(dados[!is.na(entregaAceita),entregaAceita])
+```
+
+### 2. Mapa interativo do número de entregas em cada bairro
+
+Utilizando os shapefiles dos bairros fornecidos no [site da prefeitura de Porto Alegre](http://www2.portoalegre.rs.gov.br/spm/default.php?p_secao=310), criamos um objeto `SpatialPolygonsDataFrame` com o pacote `rgdal`. Depois utilizamos o pacote `leaflet` para plotar essa camada de polígonos sobre o mapa de Porto Alegre.   
+
+```{r, eval=FALSE}
+# Importando o shapefile na forma de SpatialPolygonsDataFrame
+poa <- readOGR('/mnt/data/data-science/husky/shapefiles/Bairros_LC12112_16.shp',
+               verbose = F)
+# Transformando as coordenadas em projeção
+poat <- spTransform(poa, CRS("+proj=longlat +datum=WGS84 +no_defs"))
+# Preparando dados usados no leaflet
+dados$bairro <- ordered(dados$bairro, levels = dados[,.N,by=bairro][order(N)][[1]])
+# Popup
+poapopup <- paste0("<b>",poat$NOME,"</b>")
+# Paleta de cores
+poacor <-  colorFactor(colorRampPalette(brewer.pal(9,"Blues"),
+                       interpolate = "spline",bias=2)(length(levels(dados$bairro))), 
+                       reverse=F,ordered = T, na.color = '#e0e0e0',
+                       domain = dados$bairro,levels=dados[,.N,by=bairro][order(N)][[1]])
+# Plotando mapa
+leaflet() %>% addProviderTiles("CartoDB.Positron") %>%
+  # Setando a posição inicial do mapa
+  setView(lng = -51.168735, lat=-30.048704,zoom=12) %>%
+  # Adicionando a camada de polígonos
+  addPolygons(data=poat,stroke=T,weight=1,color="white", popup = poapopup,
+              fillOpacity=0.9, dashArray = "3", smoothFactor = 0.5,
+              fillColor = ~poacor(poat$NOME), 
+              highlight = highlightOptions(
+                weight = "2",
+                dashArray = "",
+                fillOpacity = 1,
+                bringToFront = T)
+              ) %>%
+  # Adicionando a legenda
+  addLegend(position = 'bottomright', colors = brewer.pal(9,"Blues"), opacity = 1,
+            labels = c('0','1','5','10','20','40','50','75','+100'),
+            title = "Pedidos")
+```
+
+<div align = "center">
+```{r, echo=FALSE}
+# Importando o shapefile na forma de SpatialPolygonsDataFrame
+poa <- readOGR('/mnt/data/data-science/husky/shapefiles/Bairros_LC12112_16.shp',
+               verbose = F)
+# Transformando as coordenadas em projeção
+poat <- spTransform(poa, CRS("+proj=longlat +datum=WGS84 +no_defs"))
+# Preparando dados usados no leaflet
+dados$bairro <- ordered(dados$bairro, levels = dados[,.N,by=bairro][order(N)][[1]])
+# Popup
+poapopup <- paste0("<b>",poat$NOME,"</b>")
+# Paleta de cores
+poacor <-  colorFactor(colorRampPalette(brewer.pal(9,"Blues"),
+                       interpolate = "spline",bias=2)(length(levels(dados$bairro))), 
+                       reverse=F,ordered = T, na.color = '#e0e0e0',
+                       domain = dados$bairro,levels=dados[,.N,by=bairro][order(N)][[1]])
+# Plotando mapa
+leaflet() %>% addProviderTiles("CartoDB.Positron") %>%
+  # Setando a posição inicial do mapa
+  setView(lng = -51.168735, lat=-30.048704,zoom=12) %>%
+  # Adicionando a camada de polígonos
+  addPolygons(data=poat,stroke=T,weight=1,color="white", popup = poapopup,
+              fillOpacity=0.9, dashArray = "3", smoothFactor = 0.5,
+              fillColor = ~poacor(poat$NOME), 
+              highlight = highlightOptions(
+                weight = "2",
+                dashArray = "",
+                fillOpacity = 1,
+                bringToFront = T)
+              ) %>%
+  # Adicionando a legenda
+  addLegend(position = 'bottomright', colors = brewer.pal(9,"Blues"), opacity = 1,
+            labels = c('0','1','5','10','20','40','50','75','+100'),
+            title = "Pedidos")
+```
+</div>
+
+
+
+### 3. Visualizações usando as Datas
+
+#### Histograma do Total de Pedidos
+
+A partir das variáveis computadas anteriormente, produzimos algumas visualizações dos pedidos ao longo do tempo. Primeiro foi feito um gráfico do total de pedidos mês a mês, por ano compreendido nos dados.
+
+```{r, eval=FALSE}
+# Histograma do Número Total de Pedidos/Mês
+plot_ly(x = meses18, type = 'histogram', name="2018") %>%
+  add_histogram(meses17, name="2017") %>%
+  add_histogram(meses16, name = "2016") %>%
+  layout(barmode = 'overlay',title = "Histograma do Número Total de Pedidos/Mês")
+```
+<div align="center">
+```{r, echo=FALSE}
+# Histograma do Número Total de Pedidos/Mês
+plot_ly(x = meses18, type = 'histogram', name="2018") %>%
+  add_histogram(meses17, name="2017") %>%
+  add_histogram(meses16, name = "2016") %>%
+  layout(barmode = 'overlay',title = "Histograma do Número Total de Pedidos/Mês")
+```
+</div>
+
+#### Pedido/Hora, Pedido/Dia da Semana
+
+Fizemos também duas visualizações facetadas mês a mês, uma de Pedidos/Hora e outra Pedidos/Dia da Semana. 
+
+```{r, fig.height=6, fig.width= 10}
+# pedidos/hora facet histograms
+dtp <- data.frame(hora = hora, meses =meses)
+ggplot(dtp) +
+  scale_fill_distiller(type = 'div',palette = "BuPu",direction = 1,limits=c(-200,390)) +
+  geom_bar(mapping = aes(x=hora,fill=..count..),alpha=1) +
+  ggtitle("Pedidos por Hora", subtitle = "Mês a mês") +
+  scale_x_discrete("Hora",limits = c(10,12,14,16,18,20,22)) +
+  ylab("") +
+  facet_wrap(~meses)
+
+# pedidos/diasem facet histogram
+dts <- data.frame(semdia = semdia, meses =meses)
+ggplot(dts) +
+  scale_fill_distiller(type = 'seq',palette = 'YlOrRd',direction = 1) +
+  geom_bar(mapping = aes(x=semdia,fill=..count..),alpha=0.9) +
+  ggtitle("Pedidos por Dia da Semana", subtitle = "Mês a mês") +
+  xlab("Dias da Semana") +
+  ylab("") +
+  facet_wrap(~meses) 
+```
+
+
+#### Heatmaps dos Pedidos/Hora e Pedidos/Dia da Semana
+
+Também foram feitos mapas de calor dos Pedidos/Hora e Pedidos/Dia da Semana. Foi adicionada também uma visualização dos dados em superfície.
+
+```{r, eval = FALSE}
+# Gráfico dos Pedidos por dia da Semana (Mensal, 2016-2018)
+mat <- as.matrix(table(meses,semdia))
+plot_ly(x = colnames(mat),
+        y = rownames(mat),
+        z = mat,
+        type = "heatmap",
+        colors = rev(brewer.pal(11,"Spectral"))) %>%
+  layout(title = "Pedidos por dia da Semana (Mensal, 2016-2018)")
+```
+<div align="center">
+```{r, echo=FALSE}
+# Gráfico dos Pedidos por dia da Semana (Mensal, 2016-2018)
+mat <- as.matrix(table(meses,semdia))
+plot_ly(x = colnames(mat),
+        y = rownames(mat),
+        z = mat,
+        type = "heatmap",
+        colors = rev(brewer.pal(11,"Spectral"))) %>%
+  layout(title = "Pedidos por dia da Semana (Mensal, 2016-2018)")
+```
+</div>
+
+
+```{r, eval=FALSE}
+# Gráfico dos Pedidos a cada hora (Mês, 2016-2018)
+mat2 <- as.matrix(table(hora,meses))
+plot_ly(x = colnames(mat2),
+        y = rownames(mat2),
+        z = mat2,
+        type = "heatmap",
+        colors = rev(brewer.pal(11,"Spectral"))) %>%
+  layout(title = "Número de Pedidos a cada hora (Mês, 2016-2018)")
+```
+<div align="center">
+```{r, echo=FALSE}
+# Gráfico dos Pedidos a cada hora (Mês, 2016-2018)
+mat2 <- as.matrix(table(hora,meses))
+plot_ly(x = colnames(mat2),
+        y = rownames(mat2),
+        z = mat2,
+        type = "heatmap",
+        colors = rev(brewer.pal(11,"Spectral"))) %>%
+  layout(title = "Número de Pedidos a cada hora (Mês, 2016-2018)")
+```
+</div>
+
+### 4. Métricas de Coleta, Entrega e Total
+
+Por último, elaboramos métricas de tempo para avaliar cada entregador (**Courier**). A Husky trabalha com um sistema parecido com o UberEats. Os entregadores ficam conectados à plataforma da empresa e recebem os pedidos pela proximidade e rota, calculados pelo algoritmo desenvolvido pela empresa. Dessa forma, o entregador leva um tempo até se deslocar ao restaurante (**Coleta**), e outro até chegar ao cliente (**Entrega**). Medimos essas duas variáveis, além do tempo total da entrega, desde o aceite do pedido pelo restaurante até a finalização da entrega.
+
+```{r}
+# Definindo variaveis tempoColeta, tempoEntrega e tempoTotal
+dados[, ':='(tempoColeta = as.numeric(coletaFinalizada - entregaAgendada),
+             tempoEntrega = as.numeric(entregaFinalizada - coletaFinalizada),
+             tempoTotal = as.numeric(entregaFinalizada - entregaAgendada))]
+
+boys <- dados[tempoColeta>0 & !is.na(tempoColeta) & tempoColeta<(43200) & 
+                tempoEntrega>0 & !is.na(tempoEntrega) & tempoEntrega<(43200) &
+                tempoTotal>0 & !is.na(tempoTotal) & tempoTotal<(43200) & !is.na(idCourier),
+              .(mediaColeta = mean(tempoColeta),
+                mediaEntrega = mean(tempoEntrega),
+                mediaTotal = mean(tempoTotal)),by=idCourier]
+```
+
+Dada a maneira como o algoritmo da Husky distribui os pedidos, onde cada entregador faz diversas coletas ou entregas conforme a proximidade e rota, notamos que não era interessante calcular o tempo médio dessas variáveis. Dessa forma, optamos por normalizar os dados seguindo a fórmula $\frac{X - \mu}{\sigma}$, e assim medir o desempenho dos entregadores pelos desvios em relação à média.
+
+```{r}
+boys[,':='(Coleta = round((mediaColeta - mean(mediaColeta))/sd(mediaColeta),2),
+           Entrega = round((mediaEntrega - mean(mediaEntrega))/sd(mediaEntrega),2),
+           Total = round((mediaTotal - mean(mediaTotal))/sd(mediaTotal),2))]             
+boys <- gather(boys,key="tipo",value="valor",c(Coleta,Entrega,Total)) %>% as.data.table()
+boys[,sinal := ifelse(valor>0,"Acima","Abaixo")]
+```
+
+
+#### Visualização do Tempo Médio de coleta por Courier, Normalizado
+
+Visualização do desempenho de cada courier na coleta, entrega e no tempo total. Os dados foram normalizados, como descrito acima. Como medimos tempo, valores negativos (menor tempo) são preferidos.
+
+```{r}
+# Gráfico divergente  do tempo de Coleta, Entrega e Total, normalizados.
+boys <- boys %>% ungroup() %>% arrange(tipo,desc(valor)) %>% mutate(ordem = row_number())
+ggplot(boys, aes(x=ordem,y=valor, fill = sinal)) + 
+  geom_bar(stat="identity",show.legend = F) + 
+  facet_wrap(.~tipo,scales="free") +
+  ggtitle("Tempo por Courier (Normalizado)") +
+  xlab("Id do Courier") +
+  ylab("Desvios em relação à Média") +
+  scale_x_continuous(
+    breaks = boys$ordem,
+    labels = boys$idCourier,
+    expand = c(0,0)) + coord_flip() 
+```
