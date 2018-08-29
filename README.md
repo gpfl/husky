@@ -1,4 +1,5 @@
 # Análise dos Dados de Entregas Husky
-@ por Gustavo Flores
+@ por Gustavo Flores ([LinkedIn](www.linkedin.com/in/gpfl))
 
-Documento Rpubs: https://rpubs.com/gpfl/husky
+Para uma análise detalhada do código, [ver Rpubs](https://rpubs.com/gpfl/husky)
+
